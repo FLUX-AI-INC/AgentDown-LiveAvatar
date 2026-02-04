@@ -3,7 +3,7 @@
 Agent Down - LiveAvatar Video Generation
 
 Generates talking head videos using LiveAvatar's 4-step distilled model.
-Supports real-time streaming and infinite length generation.
+Uses subprocess to run LiveAvatar's inference script properly.
 """
 from __future__ import annotations
 
@@ -11,13 +11,12 @@ import os
 import sys
 import json
 import time
-import math
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Tuple
 
 import torch
-import numpy as np
-import PIL.Image
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -26,52 +25,49 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from config import settings, CHARACTERS, ASSETS_DIR, OUTPUT_DIR, MODELS_DIR
 
 
-def check_gpu() -> Tuple[str, torch.dtype]:
-    """Check GPU availability and return device/dtype"""
+def check_gpu() -> Tuple[str, float]:
+    """Check GPU availability and return device info"""
     if not torch.cuda.is_available():
-        print("⚠️  CUDA not available, using CPU (will be slow)")
-        return "cpu", torch.float32
+        print("⚠️  CUDA not available")
+        return "cpu", 0.0
     
-    device = "cuda"
     gpu_name = torch.cuda.get_device_name(0)
     vram = torch.cuda.get_device_properties(0).total_memory / 1e9
     
     print(f"🖥️  GPU: {gpu_name}")
     print(f"💾 VRAM: {vram:.1f} GB")
     
-    # LiveAvatar works best with bfloat16
-    dtype = torch.bfloat16
-    print("   Using bfloat16")
-    
-    return device, dtype
+    return "cuda", vram
 
 
 class LiveAvatarGenerator:
     """
     Video generator using LiveAvatar.
     
-    Supports:
-    - 4-step distilled inference (real-time capable)
-    - Infinite length streaming
-    - FP8 quantization for lower VRAM
+    Runs LiveAvatar's inference script via subprocess for proper integration.
     """
     
-    def __init__(self, model_path: Optional[str] = None, base_model_path: Optional[str] = None):
-        self.device, self.dtype = check_gpu()
-        self.model_path = Path(model_path or settings.liveavatar.model_path)
-        self.base_model_path = Path(base_model_path or settings.liveavatar.base_model_path)
-        self.pipe = None
+    def __init__(self):
+        self.device, self.vram = check_gpu()
+        self.liveavatar_dir = PROJECT_ROOT / "liveavatar_lib"
+        self.model_path = Path(settings.liveavatar.model_path)
+        self.base_model_path = Path(settings.liveavatar.base_model_path)
         
-        # Generation parameters (LiveAvatar defaults)
+        # Generation parameters
         self.save_fps = 16
-        self.num_frames = 93
-        self.num_cond_frames = 13
         
     def load_model(self):
-        """Load the LiveAvatar pipeline"""
-        print(f"📦 Loading LiveAvatar...")
+        """Verify model paths exist"""
+        print(f"📦 Verifying LiveAvatar setup...")
+        print(f"   LiveAvatar dir: {self.liveavatar_dir}")
         print(f"   Model path: {self.model_path}")
         print(f"   Base model path: {self.base_model_path}")
+        
+        if not self.liveavatar_dir.exists():
+            raise FileNotFoundError(
+                f"LiveAvatar library not found at {self.liveavatar_dir}\n"
+                f"Clone with: git clone https://github.com/Alibaba-Quark/LiveAvatar.git {self.liveavatar_dir}"
+            )
         
         if not self.model_path.exists():
             raise FileNotFoundError(
@@ -85,42 +81,7 @@ class LiveAvatarGenerator:
                 f"Download with: huggingface-cli download Wan-AI/Wan2.2-S2V-14B --local-dir {self.base_model_path}"
             )
         
-        # Import LiveAvatar components
-        try:
-            from liveavatar.pipeline import LiveAvatarPipeline
-            from liveavatar.utils import load_audio_features
-        except ImportError:
-            # Fallback: try to import from cloned repo
-            liveavatar_path = PROJECT_ROOT / "liveavatar_lib"
-            if liveavatar_path.exists():
-                sys.path.insert(0, str(liveavatar_path))
-                from liveavatar.pipeline import LiveAvatarPipeline
-                from liveavatar.utils import load_audio_features
-            else:
-                raise ImportError(
-                    "LiveAvatar library not found. Please clone it:\n"
-                    "git clone https://github.com/Alibaba-Quark/LiveAvatar.git liveavatar_lib"
-                )
-        
-        # Load pipeline
-        print("   Loading pipeline...")
-        self.pipe = LiveAvatarPipeline.from_pretrained(
-            self.base_model_path,
-            lora_path=self.model_path / "liveavatar.safetensors",
-            torch_dtype=self.dtype,
-        )
-        self.pipe.to(self.device)
-        
-        # Enable optimizations
-        if settings.liveavatar.enable_compile:
-            print("   Compiling model (first run will be slow)...")
-            self.pipe.enable_compile()
-        
-        if settings.liveavatar.enable_fp8:
-            print("   Enabling FP8 quantization...")
-            self.pipe.enable_fp8()
-        
-        print("✅ LiveAvatar pipeline loaded")
+        print("✅ LiveAvatar setup verified")
     
     def generate_single(
         self,
@@ -130,77 +91,98 @@ class LiveAvatarGenerator:
         prompt: str = "",
         num_inference_steps: int = 4,
         resolution: str = "480p",
-        num_segments: int = 1,
+        num_clips: int = 1,
         **kwargs
     ) -> Path:
-        """Generate video from reference image and audio"""
+        """Generate video from reference image and audio using LiveAvatar CLI"""
         
-        if self.pipe is None:
-            self.load_model()
+        self.load_model()
         
-        # Load reference image
-        from diffusers.utils import load_image
-        image = load_image(str(reference_image))
-        
-        # Parse resolution
+        # Prepare size parameter
         if resolution == '480p':
-            height, width = 480, 832
+            size = "832*480"
         elif resolution == '720p':
-            height, width = 768, 1280
+            size = "1280*768"
         else:
-            height, width = 480, 832
+            size = "832*480"
         
-        print(f"🎬 Generating video...")
+        print(f"🎬 Generating video with LiveAvatar...")
         print(f"   Reference: {reference_image}")
         print(f"   Audio: {audio_path}")
-        print(f"   Resolution: {width}x{height}")
+        print(f"   Resolution: {size}")
         print(f"   Steps: {num_inference_steps}")
+        print(f"   Clips: {num_clips}")
         
-        # Prepare audio
-        import librosa
-        speech_array, sr = librosa.load(str(audio_path), sr=16000)
+        # Create sample config for LiveAvatar
+        sample_config = {
+            "agent_down": {
+                "prompt": prompt or "A person speaking naturally, professional studio lighting, high quality",
+                "image": str(reference_image.absolute()),
+                "audio": str(audio_path.absolute()),
+                "num_clip": num_clips
+            }
+        }
         
-        # Calculate duration and segments
-        audio_duration = len(speech_array) / sr
-        generate_duration = self.num_frames / self.save_fps + (num_segments - 1) * (self.num_frames - self.num_cond_frames) / self.save_fps
+        # Write temp config
+        config_path = output_path.parent / "liveavatar_config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_path, "w") as f:
+            json.dump(sample_config, f, indent=2)
         
-        # Pad audio if needed
-        added_samples = math.ceil((generate_duration - audio_duration) * sr)
-        if added_samples > 0:
-            speech_array = np.append(speech_array, [0.0] * added_samples)
+        # Build command
+        cmd = [
+            "python", "-u",
+            str(self.liveavatar_dir / "minimal_inference" / "batch_eval.py"),
+            "--task", "s2v-14B",
+            "--size", size,
+            "--ckpt_dir", str(self.base_model_path),
+            "--lora_path", str(self.model_path / "liveavatar.safetensors"),
+            "--sample_list", str(config_path),
+            "--save_dir", str(output_path.parent),
+            "--sample_steps", str(num_inference_steps),
+            "--offload_model", "True",  # Save VRAM
+        ]
         
-        # Generate
-        negative_prompt = "Close-up, Bright tones, overexposed, static, blurred details, subtitles, ugly, deformed"
+        # Add FP8 if enabled
+        if settings.liveavatar.enable_fp8:
+            cmd.extend(["--enable_fp8", "True"])
         
-        generator = torch.Generator(device=self.device).manual_seed(42)
+        print(f"   Running: {' '.join(cmd[:6])}...")
         
-        output = self.pipe(
-            image=image,
-            audio=speech_array,
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            height=height,
-            width=width,
-            num_frames=self.num_frames,
-            num_inference_steps=num_inference_steps,
-            generator=generator,
-            num_segments=num_segments,
-        )
+        # Run LiveAvatar
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(self.liveavatar_dir) + ":" + env.get("PYTHONPATH", "")
         
-        # Save video
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        from liveavatar.utils import save_video_ffmpeg
-        save_video_ffmpeg(
-            output.frames,
-            str(output_path.with_suffix('')),
-            str(audio_path),
-            fps=self.save_fps,
-            quality=5
-        )
-        
-        print(f"✅ Video saved: {output_path}")
-        return output_path
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(self.liveavatar_dir),
+                env=env,
+                capture_output=False,
+                text=True,
+                check=True
+            )
+            
+            # Find output video
+            expected_output = output_path.parent / "agent_down.mp4"
+            if expected_output.exists():
+                # Rename to desired output path
+                expected_output.rename(output_path)
+                print(f"✅ Video saved: {output_path}")
+                return output_path
+            else:
+                # Look for any mp4 in output dir
+                mp4_files = list(output_path.parent.glob("*.mp4"))
+                if mp4_files:
+                    mp4_files[0].rename(output_path)
+                    print(f"✅ Video saved: {output_path}")
+                    return output_path
+                else:
+                    raise FileNotFoundError(f"No output video found in {output_path.parent}")
+                    
+        except subprocess.CalledProcessError as e:
+            print(f"❌ LiveAvatar failed: {e}")
+            raise
     
     def generate_for_host(
         self,
@@ -241,7 +223,7 @@ class LiveAvatarGenerator:
             raise FileNotFoundError(f"Avatar not found for {host} at {reference_image}")
         
         # Build prompt from character
-        prompt = f"{character.visual_description}, speaking naturally, professional studio lighting"
+        prompt = f"{character.visual_description}, speaking naturally, talking, professional studio lighting"
         
         return self.generate_single(
             reference_image=reference_image,
@@ -279,6 +261,7 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, default="", help="Text prompt")
     parser.add_argument("--steps", type=int, default=4, help="Inference steps")
     parser.add_argument("--resolution", type=str, default="480p", choices=["480p", "720p"])
+    parser.add_argument("--clips", type=int, default=1, help="Number of clips")
     
     args = parser.parse_args()
     
@@ -289,4 +272,5 @@ if __name__ == "__main__":
         prompt=args.prompt,
         num_inference_steps=args.steps,
         resolution=args.resolution,
+        num_clips=args.clips,
     )
