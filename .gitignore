@@ -1,0 +1,36 @@
+# Environment
+.env
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Models (large files)
+models/
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.pth
+
+# Output
+output/
+*.mp4
+*.mp3
+*.wav
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tmp
+*.temp
+audio_temp_file/
