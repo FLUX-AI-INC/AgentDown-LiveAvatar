@@ -116,21 +116,6 @@ class LiveAvatarGenerator:
         # Ensure output directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Create sample config for LiveAvatar (required by batch_eval.py)
-        sample_config = {
-            "agent_down": {
-                "prompt": prompt or "A person speaking naturally, professional studio lighting, high quality",
-                "image": str(reference_image.absolute()),
-                "audio": str(audio_path.absolute()),
-                "num_clip": num_clips
-            }
-        }
-        
-        # Write config file
-        config_path = output_path.parent / "liveavatar_config.json"
-        with open(config_path, "w") as f:
-            json.dump(sample_config, f, indent=2)
-        
         # Set required environment variables for single-GPU distributed mode
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.liveavatar_dir) + ":" + env.get("PYTHONPATH", "")
@@ -140,27 +125,34 @@ class LiveAvatarGenerator:
         env["WORLD_SIZE"] = "1"
         env["LOCAL_RANK"] = "0"
         
-        # Build command using plain python with sample_list (required) AND individual args
-        # batch_eval.py requires sample_list but also reads args.image/audio/prompt directly
+        # Use s2v_streaming_interact.py - simpler than batch_eval.py for single samples
         cmd = [
             "python",
-            str(self.liveavatar_dir / "minimal_inference" / "batch_eval.py"),
+            str(self.liveavatar_dir / "minimal_inference" / "s2v_streaming_interact.py"),
             "--task", "s2v-14B",
             "--size", size,
             "--ckpt_dir", str(self.base_model_path),
-            "--lora_path", str(self.model_path / "liveavatar.safetensors"),
-            "--sample_list", str(config_path),
+            "--training_config", str(self.liveavatar_dir / "liveavatar" / "configs" / "s2v_causal_sft.yaml"),
+            "--load_lora",
+            "--lora_path_dmd", str(self.model_path),
             "--image", str(reference_image.absolute()),
             "--audio", str(audio_path.absolute()),
             "--prompt", prompt or "A person speaking naturally, professional studio lighting",
             "--save_dir", str(output_path.parent),
             "--sample_steps", str(num_inference_steps),
-            "--offload_model", "True",  # Save VRAM
+            "--sample_guide_scale", "0",
+            "--sample_solver", "euler",
+            "--num_clip", str(num_clips),
+            "--infer_frames", "48",
+            "--num_gpus_dit", "1",
+            "--single_gpu",
+            "--offload_model", "True",
+            "--convert_model_dtype",
         ]
         
-        # Add FP8 if enabled
+        # Add FP8 if enabled (for memory savings)
         if settings.liveavatar.enable_fp8:
-            cmd.extend(["--enable_fp8", "True"])
+            cmd.append("--fp8")
         
         print(f"   Running: python batch_eval.py (with distributed env vars)...")
         print(f"   Command: {' '.join(cmd)}")
