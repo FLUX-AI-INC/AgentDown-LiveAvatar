@@ -134,7 +134,7 @@ class LiveAvatarGenerator:
             "--ckpt_dir", str(self.base_model_path),
             "--training_config", str(self.liveavatar_dir / "liveavatar" / "configs" / "s2v_causal_sft.yaml"),
             "--load_lora",
-            "--lora_path_dmd", str(self.model_path),
+            "--lora_path_dmd", str(self.model_path / "liveavatar.safetensors"),
             "--image", str(reference_image.absolute()),
             "--audio", str(audio_path.absolute()),
             "--prompt", prompt or "A person speaking naturally, professional studio lighting",
