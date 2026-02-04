@@ -160,16 +160,29 @@ class LiveAvatarGenerator:
             cmd.extend(["--enable_fp8", "True"])
         
         print(f"   Running: torchrun --nproc_per_node=1 batch_eval.py...")
+        print(f"   Command: {' '.join(cmd)}")
         
         try:
+            # Run with output captured so we can see errors
             result = subprocess.run(
                 cmd,
                 cwd=str(self.liveavatar_dir),
                 env=env,
-                capture_output=False,
+                capture_output=True,
                 text=True,
-                check=True
             )
+            
+            # Print stdout/stderr regardless of success
+            if result.stdout:
+                print("=== STDOUT ===")
+                print(result.stdout[-5000:] if len(result.stdout) > 5000 else result.stdout)
+            if result.stderr:
+                print("=== STDERR ===")
+                print(result.stderr[-5000:] if len(result.stderr) > 5000 else result.stderr)
+            
+            # Check return code
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
             
             # Find output video
             expected_output = output_path.parent / "agent_down.mp4"
@@ -189,7 +202,11 @@ class LiveAvatarGenerator:
                     raise FileNotFoundError(f"No output video found in {output_path.parent}")
                     
         except subprocess.CalledProcessError as e:
-            print(f"❌ LiveAvatar failed: {e}")
+            print(f"❌ LiveAvatar failed with return code {e.returncode}")
+            if hasattr(e, 'stdout') and e.stdout:
+                print("STDOUT:", e.stdout[-2000:] if len(e.stdout) > 2000 else e.stdout)
+            if hasattr(e, 'stderr') and e.stderr:
+                print("STDERR:", e.stderr[-2000:] if len(e.stderr) > 2000 else e.stderr)
             raise
     
     def generate_for_host(
