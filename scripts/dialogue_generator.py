@@ -147,6 +147,8 @@ Include personality-specific reactions and running gags.
 Make it funny, satirical, and slightly unsettling (especially GLITCH's parts).
 """
 
+    # GPT-5.2 uses Responses API for best results
+    # Temperature only works with reasoning_effort: "none"
     response = client.chat.completions.create(
         model=settings.openai.model,
         messages=[
@@ -155,6 +157,7 @@ Make it funny, satirical, and slightly unsettling (especially GLITCH's parts).
         ],
         response_format={"type": "json_object"},
         temperature=settings.openai.temperature,
+        reasoning_effort="none",  # Required for temperature to work in GPT-5.2
     )
     
     result = json.loads(response.choices[0].message.content)
@@ -193,6 +196,7 @@ The intro should:
 - Be funny and slightly ominous
 """
 
+    # GPT-5.2: Temperature only works with reasoning_effort: "none"
     response = client.chat.completions.create(
         model=settings.openai.model,
         messages=[
@@ -201,6 +205,7 @@ The intro should:
         ],
         response_format={"type": "json_object"},
         temperature=settings.openai.temperature,
+        reasoning_effort="none",
     )
     
     result = json.loads(response.choices[0].message.content)
@@ -224,6 +229,7 @@ The outro should:
 - Leave viewers slightly unsettled
 """
 
+    # GPT-5.2: Temperature only works with reasoning_effort: "none"
     response = client.chat.completions.create(
         model=settings.openai.model,
         messages=[
@@ -232,6 +238,7 @@ The outro should:
         ],
         response_format={"type": "json_object"},
         temperature=settings.openai.temperature,
+        reasoning_effort="none",
     )
     
     result = json.loads(response.choices[0].message.content)
