@@ -48,7 +48,7 @@ class OpenAIConfig(BaseModel):
     """OpenAI configuration"""
     api_key: str = os.getenv("OPENAI_API_KEY", "")
     model: str = "gpt-5.2"
-    temperature: float = 0.8
+    temperature: float = 1.0  # Higher for more creative/varied dialogue
 
 
 class LiveAvatarConfig(BaseModel):
