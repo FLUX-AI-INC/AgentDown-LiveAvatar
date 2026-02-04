@@ -3,7 +3,17 @@
 Agent Down - LiveAvatar Video Generation
 
 Generates talking head videos using LiveAvatar's 4-step distilled model.
-Uses subprocess to run LiveAvatar's inference script properly.
+Supports both single-GPU (batch) and multi-GPU (real-time 45 FPS) modes.
+
+Multi-GPU Mode (5 GPUs):
+  - Achieves 45 FPS real-time streaming
+  - Requires 5x H100/H800 80GB GPUs
+  - Uses TPP (Timestep-forcing Pipeline Parallelism)
+  
+Single-GPU Mode:
+  - Batch/offline generation
+  - Works on single 80GB GPU with FP8
+  - ~0.5 FPS (good for pre-rendered content)
 """
 from __future__ import annotations
 
@@ -25,36 +35,63 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from config import settings, CHARACTERS, ASSETS_DIR, OUTPUT_DIR, MODELS_DIR
 
 
-def check_gpu() -> Tuple[str, float]:
+def check_gpu() -> Tuple[str, float, int]:
     """Check GPU availability and return device info"""
     if not torch.cuda.is_available():
         print("⚠️  CUDA not available")
-        return "cpu", 0.0
+        return "cpu", 0.0, 0
     
+    gpu_count = torch.cuda.device_count()
     gpu_name = torch.cuda.get_device_name(0)
     vram = torch.cuda.get_device_properties(0).total_memory / 1e9
     
     print(f"🖥️  GPU: {gpu_name}")
-    print(f"💾 VRAM: {vram:.1f} GB")
+    print(f"💾 VRAM: {vram:.1f} GB per GPU")
+    print(f"🔢 GPU Count: {gpu_count}")
     
-    return "cuda", vram
+    if gpu_count >= 5:
+        print("✅ Multi-GPU mode available (5+ GPUs detected)")
+        print("   Expected performance: ~45 FPS real-time")
+    else:
+        print("ℹ️  Single-GPU mode (batch generation)")
+        print("   For real-time (45 FPS), use 5 GPUs")
+    
+    return "cuda", vram, gpu_count
+
+
+def is_multi_gpu_mode() -> bool:
+    """Check if we should use multi-GPU real-time mode"""
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    # Multi-GPU mode requires 5 GPUs and can be disabled via env var
+    return gpu_count >= 5 and os.environ.get("LIVEAVATAR_SINGLE_GPU", "").lower() != "true"
 
 
 class LiveAvatarGenerator:
     """
     Video generator using LiveAvatar.
     
+    Supports two modes:
+    - Single-GPU: Batch generation for pre-rendered content
+    - Multi-GPU (5 GPUs): Real-time 45 FPS streaming with TPP parallelism
+    
     Runs LiveAvatar's inference script via subprocess for proper integration.
     """
     
-    def __init__(self):
-        self.device, self.vram = check_gpu()
+    def __init__(self, force_single_gpu: bool = False):
+        self.device, self.vram, self.gpu_count = check_gpu()
         self.liveavatar_dir = PROJECT_ROOT / "liveavatar_lib"
         self.model_path = Path(settings.liveavatar.model_path)
         self.base_model_path = Path(settings.liveavatar.base_model_path)
         
+        # Determine mode
+        self.multi_gpu = self.gpu_count >= 5 and not force_single_gpu
+        if self.multi_gpu:
+            print("🚀 Using MULTI-GPU mode (5 GPUs, 45 FPS real-time)")
+        else:
+            print("📦 Using SINGLE-GPU mode (batch generation)")
+        
         # Generation parameters
-        self.save_fps = 16
+        self.save_fps = 25  # LiveAvatar default
         
     def load_model(self):
         """Verify model paths exist"""
@@ -82,6 +119,137 @@ class LiveAvatarGenerator:
             )
         
         print("✅ LiveAvatar setup verified")
+    
+    def generate_multi_gpu(
+        self,
+        reference_image: Path,
+        audio_path: Path,
+        output_path: Path,
+        prompt: str = "",
+        num_inference_steps: int = 4,
+        resolution: str = "720p",
+        num_clips: int = 10000,  # Effectively infinite for streaming
+        enable_compile: bool = True,
+        **kwargs
+    ) -> Path:
+        """
+        Generate video using multi-GPU real-time mode (45 FPS).
+        
+        Requires 5 GPUs with 80GB VRAM each.
+        Uses TPP (Timestep-forcing Pipeline Parallelism).
+        """
+        self.load_model()
+        
+        # Resolution for multi-GPU (can use higher res)
+        if resolution == '720p':
+            size = "720*400"  # Optimized for multi-GPU
+        elif resolution == '480p':
+            size = "704*384"
+        else:
+            size = "720*400"
+        
+        print(f"🚀 Generating video with LiveAvatar MULTI-GPU (45 FPS)...")
+        print(f"   Reference: {reference_image}")
+        print(f"   Audio: {audio_path}")
+        print(f"   Resolution: {size}")
+        print(f"   Steps: {num_inference_steps}")
+        print(f"   GPUs: 5 (4 DiT + 1 VAE)")
+        print(f"   Compile: {enable_compile}")
+        
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Environment for multi-GPU
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(self.liveavatar_dir) + ":" + env.get("PYTHONPATH", "")
+        env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4"
+        env["NCCL_DEBUG"] = "WARN"
+        env["NCCL_DEBUG_SUBSYS"] = "OFF"
+        env["ENABLE_COMPILE"] = "true" if enable_compile else "false"
+        
+        # Multi-GPU command using torchrun with 5 processes
+        cmd = [
+            "torchrun",
+            "--nproc_per_node=5",
+            "--master_port=29102",
+            str(self.liveavatar_dir / "minimal_inference" / "s2v_streaming_interact.py"),
+            "--ulysses_size", "1",
+            "--task", "s2v-14B",
+            "--size", size,
+            "--base_seed", "420",
+            "--training_config", str(self.liveavatar_dir / "liveavatar" / "configs" / "s2v_causal_sft.yaml"),
+            "--offload_model", "False",  # Keep on GPU for speed
+            "--convert_model_dtype",
+            "--prompt", prompt or "A person speaking naturally, professional studio lighting",
+            "--image", str(reference_image.absolute()),
+            "--audio", str(audio_path.absolute()),
+            "--infer_frames", "48",
+            "--load_lora",
+            "--lora_path_dmd", str(self.model_path),  # Directory for multi-GPU
+            "--sample_steps", str(num_inference_steps),
+            "--sample_guide_scale", "0",
+            "--num_clip", str(num_clips),
+            "--num_gpus_dit", "4",  # 4 GPUs for DiT
+            "--sample_solver", "euler",
+            "--enable_vae_parallel",  # 1 GPU for VAE
+            "--save_dir", str(output_path.parent),
+            "--fp8",  # Enable FP8 for memory efficiency
+        ]
+        
+        print(f"   Running: torchrun --nproc_per_node=5 s2v_streaming_interact.py...")
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(self.liveavatar_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            
+            if result.stdout:
+                print("=== STDOUT (last 3000 chars) ===")
+                print(result.stdout[-3000:] if len(result.stdout) > 3000 else result.stdout)
+            if result.stderr:
+                print("=== STDERR (last 3000 chars) ===")
+                print(result.stderr[-3000:] if len(result.stderr) > 3000 else result.stderr)
+            
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+            
+            # Find output video
+            return self._find_output_video(output_path)
+            
+        except subprocess.CalledProcessError as e:
+            print(f"❌ LiveAvatar multi-GPU failed with return code {e.returncode}")
+            raise
+    
+    def _find_output_video(self, output_path: Path) -> Path:
+        """Find and move the output video to the expected location"""
+        import shutil
+        
+        search_dirs = [
+            output_path.parent,
+            output_path.parent.parent,
+        ]
+        
+        mp4_files = []
+        for search_dir in search_dirs:
+            if search_dir.exists():
+                mp4_files.extend(list(search_dir.glob("*.mp4")))
+                mp4_files.extend(list(search_dir.glob("video*.mp4")))
+        
+        if mp4_files:
+            mp4_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+            source_video = mp4_files[0]
+            shutil.move(str(source_video), str(output_path))
+            print(f"✅ Video saved: {output_path}")
+            return output_path
+        else:
+            print(f"Looking for videos in: {search_dirs}")
+            for d in search_dirs:
+                if d.exists():
+                    print(f"  Contents of {d}: {list(d.iterdir())}")
+            raise FileNotFoundError(f"No output video found in {search_dirs}")
     
     def generate_single(
         self,
@@ -199,35 +367,8 @@ class LiveAvatarGenerator:
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
             
-            # Find output video - LiveAvatar saves with timestamp in filename
-            # It may save to save_dir directly or in a subdirectory
-            search_dirs = [
-                output_path.parent,  # The video/ subdirectory
-                output_path.parent.parent,  # The segment directory (save_dir)
-            ]
-            
-            mp4_files = []
-            for search_dir in search_dirs:
-                mp4_files.extend(list(search_dir.glob("*.mp4")))
-                mp4_files.extend(list(search_dir.glob("video*.mp4")))
-            
-            if mp4_files:
-                # Get the most recently created mp4
-                mp4_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-                source_video = mp4_files[0]
-                
-                # Move to desired output path
-                import shutil
-                shutil.move(str(source_video), str(output_path))
-                print(f"✅ Video saved: {output_path}")
-                return output_path
-            else:
-                # List what's in the directories for debugging
-                print(f"Looking for videos in: {search_dirs}")
-                for d in search_dirs:
-                    if d.exists():
-                        print(f"  Contents of {d}: {list(d.iterdir())}")
-                raise FileNotFoundError(f"No output video found in {search_dirs}")
+            # Find output video
+            return self._find_output_video(output_path)
                     
         except subprocess.CalledProcessError as e:
             print(f"❌ LiveAvatar failed with return code {e.returncode}")
@@ -278,13 +419,23 @@ class LiveAvatarGenerator:
         # Build prompt from character
         prompt = f"{character.visual_description}, speaking naturally, talking, professional studio lighting"
         
-        return self.generate_single(
-            reference_image=reference_image,
-            audio_path=audio_path,
-            output_path=output_path,
-            prompt=prompt,
-            **kwargs
-        )
+        # Use multi-GPU if available, otherwise single-GPU
+        if self.multi_gpu:
+            return self.generate_multi_gpu(
+                reference_image=reference_image,
+                audio_path=audio_path,
+                output_path=output_path,
+                prompt=prompt,
+                **kwargs
+            )
+        else:
+            return self.generate_single(
+                reference_image=reference_image,
+                audio_path=audio_path,
+                output_path=output_path,
+                prompt=prompt,
+                **kwargs
+            )
 
 
 # Convenience function

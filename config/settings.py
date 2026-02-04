@@ -60,15 +60,27 @@ class OpenAIConfig(BaseModel):
 
 
 class LiveAvatarConfig(BaseModel):
-    """LiveAvatar model configuration"""
+    """
+    LiveAvatar model configuration
+    
+    Supports two modes:
+    - Single-GPU: Batch generation (set LIVEAVATAR_SINGLE_GPU=true to force)
+    - Multi-GPU: Real-time 45 FPS (requires 5 GPUs, auto-detected)
+    """
     model_path: str = str(MODELS_DIR / "LiveAvatar")
     base_model_path: str = str(MODELS_DIR / "Wan2.2-S2V-14B")
     
     # Generation settings
     num_inference_steps: int = 4  # LiveAvatar uses 4-step distilled model
-    resolution: str = "480p"  # 480p or 720p
-    enable_fp8: bool = os.getenv("ENABLE_FP8", "false").lower() == "true"
+    resolution: str = "480p"  # 480p or 720p for single-GPU, 720p for multi-GPU
+    enable_fp8: bool = os.getenv("ENABLE_FP8", "true").lower() == "true"  # Default true for memory
     enable_compile: bool = os.getenv("ENABLE_COMPILE", "true").lower() == "true"
+    
+    # Multi-GPU settings (for 45 FPS real-time)
+    # Requires 5 GPUs: 4 for DiT (TPP parallelism) + 1 for VAE
+    multi_gpu_dit_count: int = 4  # Number of GPUs for DiT model
+    multi_gpu_resolution: str = "720*400"  # Optimized for multi-GPU
+    force_single_gpu: bool = os.getenv("LIVEAVATAR_SINGLE_GPU", "false").lower() == "true"
 
 
 class CharacterConfig(BaseModel):
