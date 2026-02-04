@@ -181,22 +181,35 @@ class LiveAvatarGenerator:
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
             
-            # Find output video
-            expected_output = output_path.parent / "agent_down.mp4"
-            if expected_output.exists():
-                # Rename to desired output path
-                expected_output.rename(output_path)
+            # Find output video - LiveAvatar saves with timestamp in filename
+            # It may save to save_dir directly or in a subdirectory
+            search_dirs = [
+                output_path.parent,  # The video/ subdirectory
+                output_path.parent.parent,  # The segment directory (save_dir)
+            ]
+            
+            mp4_files = []
+            for search_dir in search_dirs:
+                mp4_files.extend(list(search_dir.glob("*.mp4")))
+                mp4_files.extend(list(search_dir.glob("video*.mp4")))
+            
+            if mp4_files:
+                # Get the most recently created mp4
+                mp4_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                source_video = mp4_files[0]
+                
+                # Move to desired output path
+                import shutil
+                shutil.move(str(source_video), str(output_path))
                 print(f"✅ Video saved: {output_path}")
                 return output_path
             else:
-                # Look for any mp4 in output dir
-                mp4_files = list(output_path.parent.glob("*.mp4"))
-                if mp4_files:
-                    mp4_files[0].rename(output_path)
-                    print(f"✅ Video saved: {output_path}")
-                    return output_path
-                else:
-                    raise FileNotFoundError(f"No output video found in {output_path.parent}")
+                # List what's in the directories for debugging
+                print(f"Looking for videos in: {search_dirs}")
+                for d in search_dirs:
+                    if d.exists():
+                        print(f"  Contents of {d}: {list(d.iterdir())}")
+                raise FileNotFoundError(f"No output video found in {search_dirs}")
                     
         except subprocess.CalledProcessError as e:
             print(f"❌ LiveAvatar failed with return code {e.returncode}")
