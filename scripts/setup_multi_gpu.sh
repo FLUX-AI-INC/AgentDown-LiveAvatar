@@ -63,8 +63,15 @@ pip install flash_attn_3 --find-links https://windreamer.github.io/flash-attenti
 # Install hf_transfer for fast downloads
 pip install hf_transfer
 
+# Set temp directory to workspace (avoid disk space issues on root)
+export TMPDIR=/workspace/tmp
+mkdir -p /workspace/tmp
+
 # Install project requirements
 pip install -r requirements.txt
+
+# Install additional dependencies that may be missing
+pip install easydict aiohttp dashscope peft hjson ninja py-cpuinfo
 
 # =============================================================================
 # 3. Clone LiveAvatar Library
@@ -79,9 +86,12 @@ else
     git clone https://github.com/Alibaba-Quark/LiveAvatar.git liveavatar_lib
 fi
 
-# Install LiveAvatar dependencies
+# Install LiveAvatar dependencies (with --no-deps to avoid conflicts)
 echo "📦 Installing LiveAvatar dependencies..."
-pip install -r liveavatar_lib/requirements.txt
+pip install -r liveavatar_lib/requirements.txt --no-deps 2>/dev/null || true
+
+# Ensure all critical LiveAvatar deps are installed
+pip install easydict decord ftfy einops omegaconf accelerate safetensors transformers diffusers aiohttp dashscope peft
 
 # =============================================================================
 # 4. Download Models
