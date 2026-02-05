@@ -65,6 +65,46 @@ def check_environment():
     return True
 
 
+def _concat_videos(clip_paths: list, output_path: Path):
+    """Concatenate video clips using ffmpeg"""
+    import subprocess
+    import tempfile
+    
+    # Create ffmpeg concat file
+    concat_file = output_path.parent / "concat_list.txt"
+    with open(concat_file, "w") as f:
+        for clip in clip_paths:
+            f.write(f"file '{clip}'\n")
+    
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(concat_file),
+        "-c", "copy",
+        str(output_path),
+    ]
+    
+    print(f"   🎬 Concatenating {len(clip_paths)} clips...")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print(f"   ⚠️ ffmpeg concat failed, trying re-encode...")
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_file),
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            str(output_path),
+        ]
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+    
+    concat_file.unlink(missing_ok=True)
+    print(f"   ✅ Final video: {output_path}")
+
+
 async def generate_segment(
     segment_type: str,
     topic: str,
@@ -131,9 +171,19 @@ async def generate_segment(
     audio_dir = output_dir / "audio"
     audio_dir.mkdir(exist_ok=True)
     
+    # Check if we have multiple hosts - if so, use individual TTS
+    # so we get per-line audio files for per-host video generation
+    hosts_in_dialogue = set(line.get("host", "SIGMA-7") for line in dialogue)
+    use_individual = len(hosts_in_dialogue) > 1
+    
+    if use_individual:
+        print(f"   🎭 Multiple hosts detected ({', '.join(hosts_in_dialogue)})")
+        print(f"   Using individual TTS for per-host video clips...")
+    
     audio_tracks = await generate_all_audio(
         dialogue=dialogue,
         output_dir=audio_dir,
+        use_dialogue_api=not use_individual,  # Use individual TTS for multi-host
     )
     
     master_audio = audio_tracks.get("master")
@@ -146,34 +196,88 @@ async def generate_segment(
     # Step 3: Generate video with LiveAvatar
     print("\n3️⃣  GENERATING VIDEO (LiveAvatar)...")
     
-    # Determine primary host from dialogue
-    primary_host = dialogue[0].get("host", "SIGMA-7") if dialogue else "SIGMA-7"
-    
     video_dir = output_dir / "video"
     video_dir.mkdir(exist_ok=True)
     
     generator = LiveAvatarGenerator()
     generator.load_model()
     
-    # Calculate number of segments based on audio duration
+    # Split audio per dialogue line and generate video per host
     from pydub import AudioSegment
-    audio = AudioSegment.from_mp3(master_audio)
-    audio_duration = len(audio) / 1000  # seconds
     
-    num_segments = max(1, int(audio_duration / 5))  # ~5 seconds per segment
+    # Check if we have individual audio tracks per line
+    individual_audio_dir = output_dir / "audio"
+    individual_files = sorted(individual_audio_dir.glob("dialogue_*.mp3"))
     
-    print(f"   📹 Generating {num_segments} video segments...")
-    
-    output_video = video_dir / "segment.mp4"
-    
-    generator.generate_for_host(
-        host=primary_host,
-        audio_path=master_audio,
-        output_path=output_video,
-        resolution=resolution,
-        num_inference_steps=steps,
-        num_segments=num_segments,
-    )
+    if individual_files and len(individual_files) == len(dialogue):
+        # We have per-line audio files - generate per-host video clips
+        print(f"   📹 Generating {len(dialogue)} video clips (per host)...")
+        
+        clip_videos = []
+        for i, (line, audio_file) in enumerate(zip(dialogue, individual_files)):
+            host = line.get("host", "SIGMA-7")
+            clip_output = video_dir / f"clip_{i:03d}_{host.lower()}.mp4"
+            
+            print(f"   [{i+1}/{len(dialogue)}] {host}: {line.get('text', '')[:50]}...")
+            
+            try:
+                generator.generate_for_host(
+                    host=host,
+                    audio_path=audio_file,
+                    output_path=clip_output,
+                    resolution=resolution,
+                    num_inference_steps=steps,
+                )
+                clip_videos.append(clip_output)
+            except Exception as e:
+                print(f"   ⚠️ Failed clip {i}: {e}")
+        
+        # Concatenate clips into final video
+        if clip_videos:
+            output_video = video_dir / "segment.mp4"
+            _concat_videos(clip_videos, output_video)
+        else:
+            print("❌ No clips generated")
+            return None
+    else:
+        # Single master audio - generate per-host clips by splitting audio at dialogue boundaries
+        # For now, generate one video per unique host using the master audio
+        # Each host gets the full master audio (LiveAvatar handles lip-sync)
+        hosts_in_dialogue = []
+        seen = set()
+        for line in dialogue:
+            h = line.get("host", "SIGMA-7")
+            if h not in seen:
+                hosts_in_dialogue.append(h)
+                seen.add(h)
+        
+        if len(hosts_in_dialogue) == 1:
+            # Single host - just generate one video
+            print(f"   📹 Single host: {hosts_in_dialogue[0]}")
+            output_video = video_dir / "segment.mp4"
+            generator.generate_for_host(
+                host=hosts_in_dialogue[0],
+                audio_path=master_audio,
+                output_path=output_video,
+                resolution=resolution,
+                num_inference_steps=steps,
+            )
+        else:
+            # Multiple hosts - generate separate videos, pick primary for now
+            # TODO: Split audio per dialogue line for true multi-host switching
+            primary_host = hosts_in_dialogue[0]
+            print(f"   📹 Multiple hosts detected: {hosts_in_dialogue}")
+            print(f"   📹 Using primary host: {primary_host}")
+            print(f"   ℹ️  For multi-character switching, use individual TTS mode")
+            
+            output_video = video_dir / "segment.mp4"
+            generator.generate_for_host(
+                host=primary_host,
+                audio_path=master_audio,
+                output_path=output_video,
+                resolution=resolution,
+                num_inference_steps=steps,
+            )
     
     # Step 4: Summary
     print("\n" + "=" * 60)
