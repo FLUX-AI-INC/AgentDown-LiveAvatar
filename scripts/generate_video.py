@@ -193,8 +193,15 @@ class LiveAvatarGenerator:
             "--sample_solver", "euler",
             "--enable_vae_parallel",  # 1 GPU for VAE
             "--save_dir", str(output_path.parent),
-            "--fp8",  # Enable FP8 for memory efficiency
         ]
+        
+        # FP8 only works on H100/H800 (Hopper architecture), not A100
+        gpu_name = torch.cuda.get_device_name(0).lower()
+        if "h100" in gpu_name or "h800" in gpu_name:
+            cmd.append("--fp8")
+            print("   FP8: Enabled (H100/H800 detected)")
+        else:
+            print(f"   FP8: Disabled ({gpu_name} - not Hopper architecture)")
         
         print(f"   Running: torchrun --nproc_per_node=5 s2v_streaming_interact.py...")
         
