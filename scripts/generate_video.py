@@ -184,7 +184,7 @@ class LiveAvatarGenerator:
             "--audio", str(audio_path.absolute()),
             "--infer_frames", "48",
             "--load_lora",
-            "--lora_path_dmd", str(self.model_path),  # Directory for multi-GPU
+            "--lora_path_dmd", str(self.model_path / "liveavatar.safetensors"),  # Must be file, not directory
             "--sample_steps", str(num_inference_steps),
             "--sample_guide_scale", "0",
             "--num_clip", str(num_clips),
